@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -14,8 +15,9 @@ import (
 
 // Query represent a word query
 type Query struct {
-	Words []string
-	Lang  string
+	Words    []string
+	Lang     string
+	WebTrans bool
 }
 
 // Pronounce structure
@@ -30,7 +32,52 @@ func (p Pronounce) String() string {
 
 // Result of query the dictionary
 type Result struct {
+	Title         string
 	PronounceList []Pronounce
+	Translates    []string
+	WebTranslates []string
+	WebPhrases    []string
+	Origin        string
+}
+
+func (r Result) String() string {
+	builder := &strings.Builder{}
+	builder.WriteString("-----------------------\n")
+	builder.WriteString(r.Title)
+	builder.WriteString("\n-----------------------\n")
+	if len(r.PronounceList) > 0 {
+		for _, p := range r.PronounceList {
+			builder.WriteString(p.String())
+			builder.WriteString("\n")
+		}
+		builder.WriteString("-----------------------\n")
+	}
+	if len(r.Translates) > 0 {
+		for _, t := range r.Translates {
+			builder.WriteString(t)
+			builder.WriteString("\n")
+		}
+		builder.WriteString("-----------------------\n")
+	}
+	if len(r.WebTranslates) > 0 {
+		builder.WriteString("Web Translations\n----\n")
+		for _, t := range r.WebTranslates {
+			builder.WriteString(t)
+		}
+		builder.WriteString("-----------------------\n")
+	}
+	if len(r.WebPhrases) > 0 {
+		builder.WriteString("Web Phrases\n----\n")
+		for _, t := range r.WebPhrases {
+			builder.WriteString(t)
+		}
+		builder.WriteString("-----------------------\n")
+	}
+	if r.Origin != "" {
+		builder.WriteString(r.Origin)
+		builder.WriteString("\n-----------------------")
+	}
+	return builder.String()
 }
 
 // Engine interface
@@ -71,11 +118,18 @@ type YDEngine struct {
 
 // URL implementation
 func (e YDEngine) URL(q Query) string {
-	return "http://www.youdao.com/w/" + strings.Join(q.Words, "%20")
+	l := ""
+	if q.Lang != "chs" {
+		l = q.Lang + "/"
+	}
+	return "http://www.youdao.com/w/" + l + strings.Join(q.Words, "%20")
 }
 
 // Execute the query
 func (e YDEngine) Execute(q Query) (result Result) {
+	result.Title = strings.Join(q.Words, " ")
+	result.Origin = e.URL(q)
+
 	res, err := http.Get(e.URL(q))
 	if err != nil {
 		log.Fatal(err)
@@ -97,10 +151,21 @@ func (e YDEngine) Execute(q Query) (result Result) {
 		log.Fatal(err)
 	}
 
-	log.Info(doc)
-	// find pronounce
-	if len(q.Words) == 1 {
+	if q.Lang != "chs" {
+		switch q.Lang {
+		case "eng":
+			result.Translates = e.extractEngTranslate(doc)
+		case "jap":
+			result.Translates = e.extractJapTranslate(doc)
+		}
+	} else if len(q.Words) == 1 {
 		result.PronounceList = e.extractPronounce(doc)
+		result.Translates = e.extractTranslate(doc)
+	}
+
+	if q.WebTrans {
+		result.WebTranslates = e.extractWebTranslate(doc)
+		result.WebPhrases = e.extractWebPhrase(doc)
 	}
 
 	return
@@ -108,10 +173,174 @@ func (e YDEngine) Execute(q Query) (result Result) {
 
 func (e YDEngine) extractPronounce(doc *goquery.Document) (pronounces []Pronounce) {
 	doc.Find("div.baav").Each(func(i int, s *goquery.Selection) {
-		log.Info(s.Find("span.pronounce").Text())
+		s.Find("span.pronounce").Each(func(j int, ss *goquery.Selection) {
+			str := strings.TrimSpace(ss.Text())
+			scanner := bufio.NewScanner(strings.NewReader(str))
+			pronounce := Pronounce{}
+			for scanner.Scan() {
+				line := strings.TrimSpace(scanner.Text())
+				if strings.Index(line, "[") != -1 {
+					pronounce.Phonetic = line
+					pronounces = append(pronounces, pronounce)
+				} else {
+					pronounce.Name = line
+				}
+			}
+			if err := scanner.Err(); err != nil {
+				log.Error("unable to scan pronounce: ", err.Error())
+				return
+			}
+		})
 	})
 
-	return nil
+	return
+}
+
+func (e YDEngine) extractTranslate(doc *goquery.Document) (translates []string) {
+	doc.Find("div#phrsListTab ul li").Each(func(i int, s *goquery.Selection) {
+		translates = append(translates, s.Text())
+	})
+
+	return
+}
+
+func (e YDEngine) extractEngTranslate(doc *goquery.Document) (translates []string) {
+	builder := &strings.Builder{}
+	doc.Find("div#phrsListTab div.trans-container ul p.wordGroup").Each(func(i int, s *goquery.Selection) {
+		elSpans := s.Find("span")
+		if elSpans == nil {
+			return
+		}
+		elFirst := elSpans.First()
+		if elFirst == nil {
+			return
+		}
+		first := strings.TrimSpace(elFirst.Text())
+		titles := make([]string, 0)
+		s.Find("span.contentTitle").Each(func(j int, ss *goquery.Selection) {
+			title := ss.Find("a")
+			if title != nil {
+				titles = append(titles, strings.TrimSpace(title.Text()))
+			}
+		})
+		builder.WriteString(fmt.Sprintf("%-8s %s", first, strings.Join(titles, "; ")))
+		translates = append(translates, builder.String())
+		builder.Reset()
+	})
+
+	return
+}
+
+func (e YDEngine) extractJapTranslate(doc *goquery.Document) (translates []string) {
+	elContainer := doc.Find("div#results-contents .trans-container").First()
+	if elContainer == nil {
+		return
+	}
+
+	// ol
+	elContainer.Find("ul.ol li").Each(func(i int, s *goquery.Selection) {
+		t := s.Find("p.sense-title")
+		if t != nil {
+			str := strings.TrimSpace(t.Text())
+			if len(str) > 0 {
+				translates = append(translates, fmt.Sprintf("%d. %s", i+1, str))
+			}
+		}
+	})
+
+	// ul
+	elContainer.Find("ul.ul>li").Each(func(i int, s *goquery.Selection) {
+		elTitle := s.Find("p.sense-title")
+		if elTitle != nil {
+			translates = append(translates, strings.TrimSpace(elTitle.Text()))
+		}
+		elExample := s.Find("ul.sense-ex")
+		if elExample != nil {
+			elExample.Find("li").Each(func(j int, ss *goquery.Selection) {
+				exTitle := ss.Find("p").First()
+				if exTitle == nil {
+					return
+				}
+				str := strings.TrimSpace(exTitle.Text())
+				scanner := bufio.NewScanner(strings.NewReader(str))
+				titleComp := make([]string, 0)
+				for scanner.Scan() {
+					content := strings.TrimSpace(scanner.Text())
+					if len(content) > 0 {
+						titleComp = append(titleComp, content)
+					}
+				}
+				if err := scanner.Err(); err != nil {
+					log.Error("unable to scan example: ", err.Error())
+					return
+				}
+				translates = append(translates, strings.Join(titleComp, ""))
+				exContent := ss.Find("p.exam-sen")
+				if exContent == nil {
+					return
+				}
+				translates = append(translates, "     "+strings.TrimSpace(exContent.Text()))
+			})
+		}
+	})
+	return
+}
+
+func (e YDEngine) extractWebTranslate(doc *goquery.Document) (translates []string) {
+	doc.Find("div#tWebTrans div.wt-container").Each(func(i int, s *goquery.Selection) {
+		title := s.Find("div.title span")
+		if title == nil {
+			return
+		}
+		content := s.Find("p.collapse-content")
+		if content == nil {
+			return
+		}
+		if first := content.First(); first != nil {
+			builder := &strings.Builder{}
+			builder.WriteString(strings.TrimSpace(title.Text()))
+			builder.WriteString("\n")
+			str := strings.TrimSpace(first.Text())
+			scanner := bufio.NewScanner(strings.NewReader(str))
+			for scanner.Scan() {
+				builder.WriteString("    ")
+				builder.WriteString(strings.TrimSpace(scanner.Text()))
+				builder.WriteString("\n")
+			}
+			if err := scanner.Err(); err != nil {
+				log.Error("unable to scan web translate: ", err.Error())
+				return
+			}
+			translates = append(translates, builder.String())
+		}
+	})
+	return
+}
+
+func (e YDEngine) extractWebPhrase(doc *goquery.Document) (translates []string) {
+	builder := &strings.Builder{}
+	doc.Find("div#webPhrase p.wordGroup").Each(func(i int, s *goquery.Selection) {
+		content := strings.TrimSpace(s.Text())
+		scanner := bufio.NewScanner(strings.NewReader(content))
+		usages := make([]string, 0)
+		for scanner.Scan() {
+			usage := strings.TrimSpace(scanner.Text())
+			if usage != "" && len(usage) > 1 {
+				usages = append(usages, usage)
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			log.Error("unable to scan web phrase: ", err.Error())
+			return
+		}
+		if len(usages) <= 1 {
+			return
+		}
+		builder.WriteString(fmt.Sprintf("%-8s %s\n", usages[0], strings.Join(usages[1:], "; ")))
+		translates = append(translates, builder.String())
+		builder.Reset()
+	})
+	return
 }
 
 func detectContentCharset(body io.Reader) string {
