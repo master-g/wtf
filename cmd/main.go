@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/jessevdk/go-flags"
+	"github.com/master-g/wtf/pkg/engine"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -32,7 +33,7 @@ func main() {
 
 	// engine
 	log.Infof("use engine: %v", opts.Engine)
-	e := NewEngine(opts.Engine)
+	e := engine.NewEngine(opts.Engine)
 
 	// language
 	log.Infof("language: %v", opts.Language)
