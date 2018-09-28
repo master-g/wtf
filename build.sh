@@ -12,14 +12,14 @@ go mod vendor
 # lint
 echo "linting..."
 gometalinter	--vendor \
-							--fast \
-							--enable-gc \
-							--tests \
-							--aggregate \
-							--disable=gotype \
-							${PWD}
+				--fast \
+				--enable-gc \
+				--tests \
+				--aggregate \
+				--disable=gotype \
+				${PWD}
 
 # build
 echo "building..."
-go build
+go build ./cmd/wtf
 
